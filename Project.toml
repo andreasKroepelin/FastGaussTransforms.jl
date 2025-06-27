@@ -1,0 +1,4 @@
+name = "FastGaussTransforms"
+uuid = "ad591bae-2918-4932-8d76-d205afb3b008"
+authors = ["Andreas Kröpelin <andreas-kroepelin@gmx.de>"]
+version = "0.1.0"
