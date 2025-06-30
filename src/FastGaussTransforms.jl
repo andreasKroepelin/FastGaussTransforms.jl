@@ -1,17 +1,26 @@
 module FastGaussTransforms
 
+using Distances
+using NearestNeighbors
+using Accessors
+using StaticArrays
+using LinearAlgebra
+import LinearAlgebra: norm_sqr
+
 export FastGaussTransform, SlowGaussTransform
 
-struct FastGaussTransform{T <: Real}
-    centers::Vector{T} # In general, an array of points
-    coefficients::Array{T, 2} # In general, a rank-d tensor for every point
+include("farthest_point_clustering.jl")
+
+struct FastGaussTransform{T <: Real, N, Tree <: KDTree{SVector{N, T}}}
+    tree::Tree
+    coefficients::Matrix{T}
     h::T # sqrt(2)*std
     ry::Int # neighbor radius used in evaluation
 end
 
 # Relative error is bounded above by
 #
-# (2*rx*ry)^order/factorial(order) + exp(-ry^2)
+# sum(qs) * ((2*rx*ry)^order/factorial(order) + exp(-ry^2))
 #
 # Choose ry=ceil(Int, sqrt(-log(rtol))), rx=0.5, and
 # find order s.t. the error bound is less than rtol
@@ -32,36 +41,83 @@ function errorconstants(rtol::T) where {T}
     return rx, ry, order
 end
 
-function FastGaussTransform(
-    xs,
-    qs,
-    std;
-    rtol = eps(promote_type(eltype(xs), eltype(qs))),
-)
-    T = promote_type(eltype(xs), eltype(qs))
-    rx, ry, order = errorconstants(rtol)
-    h = convert(T, sqrt(2)*std)
-    xmin, xmax = extrema(xs)
-    range = xmax - xmin
-    centers = Vector{T}(xmin:(2 * h * rx):(xmax + 2 * h * rx))
-    xmin, xmax = extrema(centers)
-    range = xmax - xmin
-    ncenters = length(centers)
-    coefficients = zeros(T, order + 1, ncenters)
-    for (x, q) in zip(xs, qs)
-        k = ncenters == 1 ? 1 : 1 + round(Int, (x - xmin)/(2*h*rx))
-        center = centers[k]
-        t = (x-center)/h
-        c = q*exp(-t^2)
-        z = one(T)
-        coefficients[1, k] += c
-        for n in 1:order
-            # nth term is q e^(-t^2) 2^n/n! t^n
-            z *= 2/n*t
-            coefficients[n + 1, k] += c*z
+num_terms(order, dim) = binomial(order + dim, order)
+
+function graded_lexicographic_monomials!(monomials, x)
+    monomials[1] = one(eltype(monomials))
+    starts = map(_ -> 1, x)
+    stop = curr_idx = 1
+    while stop < lastindex(monomials)
+        stop = curr_idx
+        for i in eachindex(x)
+            from_range = starts[i]:stop
+            lr = length(from_range)
+            to_range = curr_idx .+ (1:lr)
+            last(to_range) > lastindex(monomials) && return
+            @views monomials[to_range] .= monomials[from_range] .* x[i]
+            @reset starts[i] = first(to_range)
+            curr_idx += lr
         end
     end
-    return FastGaussTransform(centers, coefficients, h, ry)
+end
+
+function graded_lexicographic_monomials(x, order::Integer)
+    monomials = Vector{eltype(x)}(undef, num_terms(order, length(x)))
+    graded_lexicographic_monomials!(monomials, x)
+    monomials
+end
+
+function graded_lexicographic_prefactors(T::Type{<: Real}, order::Integer, ::Val{dim}) where { dim}
+    nt = num_terms(order, dim)
+    alphas = Vector{NTuple{dim, Int}}(undef, nt)
+    prefactors = Vector{T}(undef, nt)
+    alphas[1] = ntuple(_ -> 0, Val(dim))
+    prefactors[1] = one(T)
+    
+    starts = ntuple(_ -> 1, Val(dim))
+    stop = curr_idx = 1
+    while stop < nt
+        stop = curr_idx
+        for i in StaticArrays.SOneTo(dim)
+            from_range = starts[i]:stop
+            lr = length(from_range)
+            to_range = curr_idx .+ (1:lr)
+            last(to_range) > nt && return prefactors
+            for (j, k) in zip(from_range, to_range)
+                alpha = alphas[j]
+                prefactors[k] = prefactors[j] * 2 / (alpha[i] + 1)
+                alphas[k] = alpha .+ ntuple(==(i), Val(dim))
+            end
+            @reset starts[i] = first(to_range)
+            curr_idx += lr
+        end
+    end
+    prefactors
+end
+
+function FastGaussTransform(
+    xs::AbstractVector{<: StaticVector{N, TX}},
+    qs,
+    std;
+    rtol = eps(promote_type(TX, eltype(qs))),
+) where {N,TX}
+    T = promote_type(TX, eltype(qs))
+    rx, ry, order = errorconstants(rtol)
+    h = convert(T, sqrt(2)*std)
+    tree = farthest_point_clustering(xs, std * rx)
+    ncenters = length(tree.data)
+    prefactors = graded_lexicographic_prefactors(T, order, Val(N))
+    monomials = Vector{T}(undef, length(prefactors))
+    coefficients = zeros(T, num_terms(order, N), ncenters)
+    ks, dists = nn(tree, xs)
+    for (x, q, k, d) in zip(xs, qs, ks, dists)
+        center = tree.data[k]
+        t = (x - center) / h
+        graded_lexicographic_monomials!(monomials, t)
+        c = q * exp(-(d / h)^2)
+        @view(coefficients[:, k]) .+= c .* prefactors .* monomials
+    end
+    return FastGaussTransform(tree, coefficients, h, ry)
 end
 
 function neighborindices(f::FastGaussTransform, x)
@@ -73,38 +129,36 @@ function neighborindices(f::FastGaussTransform, x)
     return max(floor(Int, imin), 1):min(ceil(Int, imax), ncenters)
 end
 
-function (f::FastGaussTransform{T})(x) where {T}
+function (f::FastGaussTransform{T})(y) where {T}
     g = zero(T)
-    for k in neighborindices(f, x)
-        center = f.centers[k]
-        t = (x - center)/f.h
-        s = f.coefficients[end, k]
-        # Horner's method
-        for n in (size(f.coefficients, 1) - 1):-1:1
-            s = f.coefficients[n, k] + t*s
-        end
-        g += exp(-t^2)*s
+    monomials = Vector{T}(undef, size(f.coefficients, 1))
+    for k in inrange(f.tree, y, f.h * f.ry)
+        center = f.tree.data[k]
+        t = (y - center) / f.h
+        graded_lexicographic_monomials!(monomials, t)
+        s = dot(monomials, @view(f.coefficients[:, k]))
+        g += exp(- norm_sqr(t)) * s
     end
     return g
 end
 
 # Dummy type used for comparison that just stores points directly,
 # and then performs naive summation
-struct SlowGaussTransform{T <: Real}
-    xs::Vector{T}
+struct SlowGaussTransform{T <: Real, N, X <: AbstractVector{<: SVector{N, T}}}
+    xs::X
     qs::Vector{T}
     h2::T
 
     function SlowGaussTransform(xs, qs, std)
-        T = promote_type(eltype(xs), eltype(qs))
-        new{T}(xs, qs, 2*std^2)
+        T = promote_type(eltype(eltype(xs)), eltype(qs))
+        new{T, length(eltype(xs)), typeof(xs)}(xs, qs, 2*std^2)
     end
 end
 
-function (f::SlowGaussTransform{T})(x) where {T}
+function (f::SlowGaussTransform{T})(y) where {T}
     g = zero(T)
-    for (xp, q) in zip(f.xs, f.qs)
-        g += q*exp(-(x-xp)^2/f.h2)
+    for (x, q) in zip(f.xs, f.qs)
+        g += q * exp(-sqeuclidean(x, y) / f.h2)
     end
     return g
 end
