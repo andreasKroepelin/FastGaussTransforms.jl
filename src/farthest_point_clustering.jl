@@ -1,6 +1,6 @@
 function farthest_point_clustering(points, max_radius)
     centers = [first(points)]
-    while length(centers) < length(points)
+    while length(centers) < length(points) ÷ 10
         dist, idx = findmax(points) do point
             minimum(centers) do center
                 sqeuclidean(point, center)

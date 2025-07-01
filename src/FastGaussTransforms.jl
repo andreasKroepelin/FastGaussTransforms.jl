@@ -20,23 +20,23 @@ end
 
 # Relative error is bounded above by
 #
-# sum(qs) * ((2*rx*ry)^order/factorial(order) + exp(-ry^2))
+# sum(abs, qs) * ((2*rx*ry)^order/factorial(order) + exp(-ry^2))
 #
 # Choose ry=ceil(Int, sqrt(-log(rtol))), rx=0.5, and
 # find order s.t. the error bound is less than rtol
-function errorconstants(rtol::T) where {T}
-    half = one(T)/2
+function errorconstants(rtol::T, Q) where {T}
+    half = one(T) / 2
     lrtol = log(rtol)
     rx = half
-    ry = ceil(Int, sqrt(-log(rtol/2)))
+    ry = ceil(Int, sqrt(-log(rtol / 2)))
     order = 0
     # numerical prefactor here is determined empirically. Theory says it should be
     # 2, but in practice it appears that a smaller number of terms is sufficient.
-    c = half*rx*ry
-    error = one(T)
-    while rtol<error
+    c = half * rx * ry
+    error = T(1)
+    while rtol < error
         order += 1
-        error *= c/order
+        error *= c / order
     end
     return rx, ry, order
 end
@@ -102,15 +102,21 @@ function FastGaussTransform(
     rtol = eps(promote_type(TX, eltype(qs))),
 ) where {N,TX}
     T = promote_type(TX, eltype(qs))
-    rx, ry, order = errorconstants(rtol)
+    rx, ry, order = errorconstants(rtol, sum(abs, qs))
     h = convert(T, sqrt(2)*std)
     tree = farthest_point_clustering(xs, std * rx)
     ncenters = length(tree.data)
     prefactors = graded_lexicographic_prefactors(T, order, Val(N))
     monomials = Vector{T}(undef, length(prefactors))
     coefficients = zeros(T, num_terms(order, N), ncenters)
-    ks, dists = nn(tree, xs)
-    for (x, q, k, d) in zip(xs, qs, ks, dists)
+    ks = zeros(Int, 1)
+    dists = zeros(T, 1)
+    for (x, q) in zip(xs, qs)
+        # empty!(ks)
+        # empty!(dists)
+        knn!(ks, dists, tree, x, 1)
+        k = only(ks)
+        d = only(dists)
         center = tree.data[k]
         t = (x - center) / h
         graded_lexicographic_monomials!(monomials, t)
@@ -129,7 +135,7 @@ function neighborindices(f::FastGaussTransform, x)
     return max(floor(Int, imin), 1):min(ceil(Int, imax), ncenters)
 end
 
-function (f::FastGaussTransform{T})(y) where {T}
+function (f::FastGaussTransform{T})(y::AbstractVector{<: Real}) where {T}
     g = zero(T)
     monomials = Vector{T}(undef, size(f.coefficients, 1))
     for k in inrange(f.tree, y, f.h * f.ry)
@@ -140,6 +146,26 @@ function (f::FastGaussTransform{T})(y) where {T}
         g += exp(- norm_sqr(t)) * s
     end
     return g
+end
+
+function (f::FastGaussTransform{T})(ys::AbstractVector{<: AbstractVector{<: Real}}) where {T}
+    gs = zeros(T, length(ys))
+    monomials = Vector{T}(undef, size(f.coefficients, 1))
+    idcs = Int[]
+    for (i, y) in zip(eachindex(gs), ys)
+        g = zero(eltype(gs))
+        empty!(idcs)
+        inrange!(idcs, f.tree, y, f.h * f.ry)
+        for k in idcs
+            center = f.tree.data[k]
+            t = (y - center) / f.h
+            graded_lexicographic_monomials!(monomials, t)
+            s = dot(monomials, @view(f.coefficients[:, k]))
+            g += exp(- norm_sqr(t)) * s
+        end
+        gs[i] = g
+    end
+    return gs
 end
 
 # Dummy type used for comparison that just stores points directly,
