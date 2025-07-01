@@ -1,6 +1,7 @@
 using FastGaussTransforms
 using FastGaussTransforms.StaticArrays
 using FastGaussTransforms.Distances
+using FastGaussTransforms.NearestNeighbors
 using Chairmarks
 using Profile
 using PProf
@@ -25,6 +26,25 @@ function naive(data)
     G * qs
 end
 
+function kdtree(data)
+    (; xs, ys, qs, std) = data
+    tree = KDTree(xs)
+    c = -0.5 / std^2
+    gs = Vector{typeof(std)}(undef, length(ys))
+    idcs = Int[]
+    for i in eachindex(ys, gs)
+        y = ys[i]
+        empty!(idcs)
+        inrange!(idcs, tree, y, 3std)
+        g = zero(eltype(gs))
+        for j in idcs
+            g += qs[j] * exp(c * sqeuclidean(xs[j], y))
+        end
+        gs[i] = g
+    end
+    gs
+end
+
 make_data(n, d) = (
     xs = [randn(SVector{d}) for _ in 1:n],
     qs = rand(n),
@@ -33,7 +53,7 @@ make_data(n, d) = (
 )
 
 function (@main)(args)
-    n = 10^4
+    n = 10^5
     d = 2
     @info "Running benchmarks with $n times $n data points in $d dimensions."
     data = make_data(n, d)
@@ -43,10 +63,12 @@ function (@main)(args)
 
     @info "Fast Gauss Transform"
     display(@be data fast evals=2 samples=1 seconds=Inf)
-    @info "Slow Gauss Transform"
-    display(@be data slow evals=2 samples=1 seconds=Inf)
-    @info "Naive"
-    display(@be data naive evals=2 samples=1 seconds=Inf)
+    # @info "Slow Gauss Transform"
+    # display(@be data slow evals=2 samples=1 seconds=Inf)
+    @info "k-d tree"
+    display(@be data kdtree evals=2 samples=1 seconds=Inf)
+    # @info "Naive"
+    # display(@be data naive evals=2 samples=1 seconds=Inf)
 
     return 0
 end

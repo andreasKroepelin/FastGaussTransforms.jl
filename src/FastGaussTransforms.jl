@@ -33,7 +33,7 @@ function errorconstants(rtol::T, Q) where {T}
     # numerical prefactor here is determined empirically. Theory says it should be
     # 2, but in practice it appears that a smaller number of terms is sufficient.
     c = half * rx * ry
-    error = T(1)
+    error = T(Q)
     while rtol < error
         order += 1
         error *= c / order
@@ -41,7 +41,7 @@ function errorconstants(rtol::T, Q) where {T}
     return rx, ry, order
 end
 
-num_terms(order, dim) = binomial(order + dim, order)
+num_terms(order, dim) = binomial(order + dim, dim)
 
 function graded_lexicographic_monomials!(monomials, x)
     monomials[1] = one(eltype(monomials))
@@ -124,15 +124,6 @@ function FastGaussTransform(
         @view(coefficients[:, k]) .+= c .* prefactors .* monomials
     end
     return FastGaussTransform(tree, coefficients, h, ry)
-end
-
-function neighborindices(f::FastGaussTransform, x)
-    centers = f.centers
-    ncenters = length(centers)
-    range = centers[end] - centers[1]
-    imin = (x-f.ry*f.h-centers[1])/range*(ncenters-1) + 1
-    imax = (x+f.ry*f.h-centers[1])/range*(ncenters-1) + 1
-    return max(floor(Int, imin), 1):min(ceil(Int, imax), ncenters)
 end
 
 function (f::FastGaussTransform{T})(y::AbstractVector{<: Real}) where {T}
