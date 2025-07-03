@@ -49,14 +49,14 @@ make_data(n, d) = (
     xs = [randn(SVector{d}) for _ in 1:n],
     qs = rand(n),
     ys = [randn(SVector{d}) for _ in 1:n],
-    std = .1,
+    std = 1.,
 )
 
 function (@main)(args)
-    n = 10^5
+    n = 10^1
     d = 2
-    @info "Running benchmarks with $n times $n data points in $d dimensions."
     data = make_data(n, d)
+    @info "Running benchmarks." n d data.std
 
     fgt = FastGaussTransform(data.xs, data.qs, data.std; rtol = eps())
     @info "precomputed values" size(fgt.coefficients) minimum(abs, fgt.coefficients) fgt.tree fgt.ry
@@ -67,8 +67,8 @@ function (@main)(args)
     # display(@be data slow evals=2 samples=1 seconds=Inf)
     @info "k-d tree"
     display(@be data kdtree evals=2 samples=1 seconds=Inf)
-    # @info "Naive"
-    # display(@be data naive evals=2 samples=1 seconds=Inf)
+    @info "Naive"
+    display(@be data naive evals=2 samples=1 seconds=Inf)
 
     return 0
 end
